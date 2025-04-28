@@ -80,124 +80,220 @@ enum class TypeId : Id
 };
 
 template<typename TDerived>
-class AnyBase
+class ISerializable
 {
-private:
-    /* data */
 public:
+    ISerializable(){}
 
-template<typename TDerived>AnyBase
-(/* args */);
+    template<typename TData>
+    void serialize(Buffer& _buf, const TData& data, const uint64_t dataLength) const
+    {
+        auto items_count = dataLength;
+        const auto* data_bytes = reinterpret_cast<const std::byte*>(&items_count);
+        buf.insert(buf.end(), data_bytes, data_bytes + items_count);
 
-template<typename TDerived>~AnyBase
-();
+        if constexpr(std::is_same_v<IntegerType, TDerived> || std::is_same_v<FloatType, TDerived>)
+        {
+            data_bytes = reinterpret_cast<const std::byte*>(&data);
+            buf.insert(buf.end(), data_bytes, data_bytes + dataLength*bytes_count);
+        }
+        else if constexpr(std::is_same_v<StringType, TDerived>)
+        {
+            data_bytes = reinterpret_cast<const std::byte*>(&data);
+            buf.insert(buf.end(), data_bytes, data_bytes + items_count);
+        }
+        else if constexpr (std::is_same_v<VectorType, TDerived>)
+        {
+            for (auto& o : data) std::visit([&](auto& item){ item.serialize(_buf); }, o);
+        }
+    }
+
+    template<typename TData>
+    Buffer::const_iterator deserialize(Buffer::const_iterator begin, Buffer::const_iterator end, TData& data, const uint64_t dataLength)
+    {
+        if (begin + dataLength >= end) return end;
+
+        if constexpr(std::is_same_v<IntegerType, TDerived> || std::is_same_v<FloatType, TDerived>)
+        {
+            std::memcpy(&data, &*begin, dataLength);
+        }
+        else if constexpr(std::is_same_v<StringType, TDerived>)
+        {
+            auto data_string = reinterpret_cast<std::string*>(&data);
+            if (data_string != nullptr)
+            {
+                data_string->clear();
+                auto current = begin;
+                for (; current < begin+dataLength || current < end; current++) data_string->push_back(*reinterpret_cast<char*>(&*current));
+                return begin+current;
+            }
+            else return end;
+        }
+        else if constexpr (std::is_same_v<VectorType, TDerived>)
+        {
+            for (; begin < begin+dataLength; )
+            {
+                begin = std::visit([&](auto& item){ return item.deserialize(begin,end); }, o);
+            }
+        }
+        return begin+dataLength;
+    }
 };
 
-template<typename TDerived>
-AnyBase::AnyBase(/* args */)
-{
-}
-
-template<typename TDerived>
-AnyBase::~AnyBase()
-{
-}
-
-
-class IntegerType : public Any
+class IntegerType : public ISerializable<IntegerType>
 {
 public:
-    IntegerType(uint64_t arg) : data(arg) 
+    IntegerType(uint64_t arg) : data(arg)
     {
-        serializeImplCallback = [this](Buffer& buf) { serializableImpl(buf); };
-        deserializeImplCallback = [this](Buffer::const_iterator begin, Buffer::const_iterator end) { deserializableImpl(begin,end); };
     }
+    void serialize(Buffer& buf) const
+    {
+        ISerializable<IntegerType>::serialize(buf,data,sizeof(data));
+    }
+    Buffer::const_iterator deserialize(Buffer::const_iterator begin, Buffer::const_iterator end)
+    {
+        return ISerializable<IntegerType>::deserialize(begin,end,data, sizeof(data));
+    }
+
+    bool operator==(const IntegerType& right) const { return data == right.data; }
+
+    uint64_t getValue() const { return data; }
 protected:
     uint64_t data;
-
-    void serializableImpl(Buffer& buf)
-    {
-        buf.clear();
-        buf.reserve(sizeof(_typeId) + sizeof(data));
-        const auto* tag_bytes = reinterpret_cast<const std::byte*>(&_typeId);
-        buf.insert(buf.end(), tag_bytes, tag_bytes + sizeof(_typeId)); 
-        
-        const auto* data_bytes = reinterpret_cast<const std::byte*>(&data);
-        buf.insert(buf.end(), data_bytes, data_bytes + sizeof(data));    
-    }
-    void deserializableImpl(Buffer::const_iterator begin, Buffer::const_iterator end)
-    {}
 };
 
-class FloatType : public Any
+class FloatType : public ISerializable<FloatType>
 {
 public:
     template <typename... Args>
     FloatType(Args &&...);
+    void serialize(Buffer& buf) const
+    {
+        ISerializable<FloatType>::serialize(buf,data, sizeof(data));
+    }
+    Buffer::const_iterator deserialize(Buffer::const_iterator begin, Buffer::const_iterator end)
+    {
+        return ISerializable<FloatType>::deserialize(begin,end,data, sizeof(data));
+    }
+
+   bool operator==(const FloatType& right) const { return data == right.data; }
+
+    double getValue() const { return data; }
+protected:
+    double data;
 };
 
-class StringType : public Any
+class StringType : public ISerializable<StringType>
 {
 public:
     template <typename... Args>
     StringType(Args &&...);
+    void serialize(Buffer& buf) const
+    {
+        ISerializable<StringType>::serialize(buf,data,data.length());
+    }
+
+    Buffer::const_iterator deserialize(Buffer::const_iterator begin, Buffer::const_iterator end)
+    {
+        Id len;
+        std::memcpy(&len,&*begin,sizeof(len));
+        return ISerializable<StringType>::deserialize(begin, end, data, data.length());
+    }
+
+    std::string getValue() const { return data; }
+    bool operator==(const StringType& right) const { return data == right.data; }
+protected:
+    std::string data;
 };
 
-class VectorType : public Any
+class VectorType : ISerializable<VectorType>
 {
+    using PayloadType = std::variant<IntegerType, FloatType, StringType, VectorType>;
 public:
     template <typename... Args>
     VectorType(Args &&...);
 
     template <typename Arg>
     void push_back(Arg &&_val);
+    
+    bool operator==(const VectorType& right) const
+    {
+        if (data.size() != right.getValue().size()) return false;
+        for(auto it1 = data.cbegin(), it2 = right.getValue().cbegin(); it1 < data.cend(); it1++, it2++)
+        {
+            if (!(*it1 == *it2)) return false;
+        }
+        return true;
+    }
+
+    void serialize(Buffer& buf) const
+    {
+        ISerializable<VectorType>::serialize(buf,data,data.size());
+    }
+    Buffer::const_iterator deserialize(Buffer::const_iterator begin, Buffer::const_iterator end)
+    {
+        Id len;
+        std::memcpy(&len,&*begin,sizeof(len));
+        return ISerializable<VectorType>::deserialize(begin+len,end,data,len);
+    }
+
+    std::vector<PayloadType> getValue() const { return data; }
+protected:
+    std::vector<PayloadType> data;
 };
 
 class Any
 {
 public:
-    using PayloadType = std::variant<FloatType, IntegerType, StringType, VectorType>;
-    using DataType = std::variant<double, uint64_t, std::string, std::vector<Any>>;
+    using PayloadType = std::variant<IntegerType, FloatType, StringType, VectorType>;
 
     template <typename... Args>//, typename = std::enable_if_t<std::is_constructible_v<PayloadType, Args...>>>
-    Any(Args &&...args) 
-        : data(std::forward(args...)) 
+    Any(Args &&...args)
+        : data(std::forward(args...))
         , serializeImpl(nullptr)
         , deserializeImpl(nullptr)
     {}
 
-    void serialize(Buffer &_buff) const 
+    void serialize(Buffer &_buff) const
     {
-        if (serializeImplCallback != nullptr) serializeImplCallback(_buff);
+        std::visit([&](const auto& payload){ payload.serialize(_buff);}, data);
     }
     Buffer::const_iterator deserialize(Buffer::const_iterator _begin, Buffer::const_iterator _end)
     {
-        if (deserializeImplCallback != nullptr) deserializeImplCallback(_begin,_end);
+        return std::visit([&](auto& payload){ return payload.deserialize(_begin, _end);}, data);
     }
 
     TypeId getPayloadTypeId() const { return _typeId; }
 
-    template <typename Type, typename = std::variant<double, uint64_t, std::vector<Any>>>
-    auto &getValue() const { return std::get<Type>(data); }
+    template <typename Type, typename = PayloadType>
+    auto &getValue() const
+    {
+        return std::visit([&_o](const auto &val)
+        {
+            using T = std::decay_t<decltype(val)>;
+            return std::get<T>(_o.data).getValue();
+        },
+        data);
+    }
 
     template <TypeId kId>
     auto &getValue() const
     {
         if constexpr (kId == TypeId::Float)
         {
-            return getValue<double>(data);
+            return getValue<FloatType>(data);
         }
         else if constexpr (kId == TypeId::Uint)
         {
-            return getValue<uint64_t>(data);
+            return getValue<IntegerType>(data);
         }
         else if constexpr (kId == TypeId::String)
         {
-            return getValue<std::string>(data);
+            return getValue<StringType>(data);
         }
         else if constexpr (kId == TypeId::Vector)
         {
-            return getValue<vector<Any>>(data);
+            return getValue<VectorType>(data);
         }
     }
 
@@ -208,29 +304,17 @@ public:
             return false;
         }
 
-        return std::visit([&](const auto &val)
-                          {
-            using T = std::decay_t<decltype(val)>;
-            return val == std::get<T>(_o.data); }, data);
+        return std::visit([&_o](const auto &val)
+            {
+                using T = std::decay_t<decltype(val)>;
+                return val == std::get<T>(_o.data);
+            },
+            data);
     }
 
 protected:
     TypeId _typeId;
-    DataType data;
-
-    void serializableImpl(Buffer& buf)
-    {
-        buf.clear();
-        buf.reserve(sizeof(_typeId) + sizeof(data));
-        const auto* tag_bytes = reinterpret_cast<const std::byte*>(&_typeId);
-        buf.insert(buf.end(), tag_bytes, tag_bytes + sizeof(_typeId)); 
-        
-        const auto* data_bytes = reinterpret_cast<const std::byte*>(&data);
-        buf.insert(buf.end(), data_bytes, data_bytes + sizeof(data));    
-    }
-
-    std::function<void(Buffer&)> serializeImplCallback;
-    std::function<void(Buffer::const_iterator, Buffer::const_iterator)> deserializeImplCallback;
+    PayloadType data;
 };
 
 class Serializator
@@ -243,7 +327,10 @@ public:
 
     static std::vector<Any> deserialize(const Buffer &_val);
 
-    const std::vector<Any> &getStorage() const;
+    const std::vector<Any> &getStorage() const { return storage; }
+
+protected:
+    std::vector<Any> storage;
 };
 
 int main()
