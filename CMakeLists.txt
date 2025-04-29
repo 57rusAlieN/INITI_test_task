@@ -8,7 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_custom_command(
     OUTPUT raw
-    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/raw.bin ${CMAKE_CURRENT_BINARY_DIR}/raw.bin
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/raw.bin ${CMAKE_BINARY_DIR}/raw.bin
 )
 
 add_executable (Main
